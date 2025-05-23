@@ -1,9 +1,9 @@
 
 import copy
 
-from google.genai import types
-
-from agent.utils import convert_tool_defs_to_google_format, convert_tool_defs_to_openai_format
+# from google.genai import types # No longer needed
+# from agent.utils import convert_tool_defs_to_google_format, convert_tool_defs_to_openai_format # convert_tool_defs_to_google_format removed
+from agent.utils import convert_tool_defs_to_openai_format # Only need openai format
 
 AVAILABLE_TOOLS = [
     {
@@ -136,25 +136,29 @@ AVAILABLE_TOOLS.append({
         },
 })"""
 
-GOOGLE_TOOLS = convert_tool_defs_to_google_format(AVAILABLE_TOOLS)
+# GOOGLE_TOOLS = convert_tool_defs_to_google_format(AVAILABLE_TOOLS) # Removed
 
 # WHY ARE THEY ALL DIFFERENT AHHHH
 OPENAI_TOOLS = convert_tool_defs_to_openai_format(AVAILABLE_TOOLS)
 
 # Just a copy of everything without the detailed_navigator or mark_checkpoint, so it can't call itself or wipe the exploration log.
-NAVIGATOR_TOOLS = []
-for entry in AVAILABLE_TOOLS:
-    if entry["name"] in ["detailed_navigator", "mark_checkpoint"]:
-        continue
-    NAVIGATOR_TOOLS.append(entry)
+# NAVIGATOR_TOOLS is not directly used by simple_agent.py's run method after refactor for SambaNova.
+# simple_agent.py now passes OPENAI_TOOLS or None to the SambaNova client.
+# If specific subsets of tools are needed, they should be constructed directly in OpenAI format.
+# For now, commenting out NAVIGATOR_TOOLS as its direct usage is unclear in the refactored agent.
+# NAVIGATOR_TOOLS = []
+# for entry in AVAILABLE_TOOLS:
+#     if entry["name"] in ["detailed_navigator", "mark_checkpoint"]:
+#         continue
+#     NAVIGATOR_TOOLS.append(entry)
 
-GOOGLE_NAVIGATOR_TOOLS = []
-for entry in GOOGLE_TOOLS:
-    if entry.function_declarations[0].name in ["detailed_navigator", "mark_checkpoint"]:
-        continue
-    GOOGLE_NAVIGATOR_TOOLS.append(entry)
+# GOOGLE_NAVIGATOR_TOOLS = [] # Removed
+# for entry in GOOGLE_TOOLS:
+#     if entry.function_declarations[0].name in ["detailed_navigator", "mark_checkpoint"]:
+#         continue
+#     GOOGLE_NAVIGATOR_TOOLS.append(entry)
 
-OPENAI_NAVIGATOR_TOOLS = []
+OPENAI_NAVIGATOR_TOOLS = [] # This can be kept if a navigator-specific subset of tools is still desired
 for entry in OPENAI_TOOLS:
     if entry["name"] in ["detailed_navigator", "mark_checkpoint"]:
         continue
@@ -187,6 +191,8 @@ DISTANT_NAVIGATOR_BUTTONS = [
     }
 ]
 
-
-GOOGLE_DISTANT_NAVIGATOR_BUTTONS = convert_tool_defs_to_google_format(DISTANT_NAVIGATOR_BUTTONS)
+# Define DISTANT_NAVIGATOR_BUTTONS_OPENAI directly, or ensure DISTANT_NAVIGATOR_BUTTONS is in the base format
+# that convert_tool_defs_to_openai_format expects (i.e. with 'input_schema')
+# For simplicity, let's assume DISTANT_NAVIGATOR_BUTTONS is already in the base format.
 OPENAI_DISTANT_NAVIGATOR_BUTTONS = convert_tool_defs_to_openai_format(DISTANT_NAVIGATOR_BUTTONS)
+# GOOGLE_DISTANT_NAVIGATOR_BUTTONS = convert_tool_defs_to_google_format(DISTANT_NAVIGATOR_BUTTONS) # Removed
