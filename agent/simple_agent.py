@@ -13,7 +13,7 @@ import time
 import json # Ensure json is imported
 
 from config import MAX_TOKENS, TEMPERATURE, DIRECT_NAVIGATION, SAMBANOVA_BASE_URL, SAMBANOVA_VISION_MODEL_ID, SAMBANOVA_TOOL_MODEL_ID, SAMBANOVA_STRATEGIST_MODEL_ID
-from agent.prompts import SYSTEM_PROMPT, SAMBANOVA_STRATEGIST_PROMPT # Added SAMBANOVA_STRATEGIST_PROMPT
+from agent.prompts import SYSTEM_PROMPT, SAMBANOVA_STRATEGIST_PROMPT, PURE_VISION_PROMPT, TOOL_MODEL_PROMPT # Placeholders
 from agent.emulator import Emulator
 from agent.tool_definitions import *
 # from agent.utils import convert_anthropic_message_history_to_google_format, extract_tool_calls_from_gemini # Removed
@@ -720,302 +720,320 @@ class SimpleAgent:
 
 
     # TODO: An obvious refactor would be to move some of these into their own functions.
-    def process_tool_call(self, tool_call_obj: Any) -> dict[str, Any]:
+    def process_tool_call(self, tool_call_obj: Any) -> dict[str, Any]: # Returns OpenAI compatible tool message part
         """
-        Process a single tool call.
-        Expects tool_call_obj to be an OpenAI ChatCompletionMessageToolCall object.
+        Process a single tool call by dispatching to specific helper methods.
+        Updates agent state via these helper methods.
+        Returns a dictionary compatible with the OpenAI 'tool' role message.
         """
         tool_name = tool_call_obj.function.name
         tool_id = tool_call_obj.id
+        tool_content_str = "" # Initialize content string
+
         try:
             tool_input = json.loads(tool_call_obj.function.arguments)
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding tool arguments for {tool_name} (ID: {tool_id}): {e}")
+            tool_content_str = f"Error: Invalid arguments for tool {tool_name}. Arguments must be valid JSON."
             return {
-                "type": "tool_result",
-                "tool_use_id": tool_id,
-                "content": [{"type": "text", "text": f"Error: Invalid arguments for tool {tool_name}. Arguments must be valid JSON."}],
+                "role": "tool",
+                "tool_call_id": tool_id,
+                "name": tool_name,
+                "content": tool_content_str,
             }
 
         logger.info(f"Processing tool call: {tool_name} (ID: {tool_id}) with input: {tool_input}")
         
-        # Check for 'explanation_of_action' if it's a convention we want to maintain
         if 'explanation_of_action' in tool_input:
             self.text_display.add_message(f"[Text from tool input] {tool_input['explanation_of_action']}")
 
         if tool_name == "press_buttons":
-            buttons = tool_input["buttons"]
-            wait = tool_input.get("wait", True)
-            return self.press_buttons(buttons, wait, tool_id)
+            tool_content_str = self._execute_press_buttons(tool_input, tool_id)
         elif tool_name == "navigate_to":
-            row = tool_input["row"]
-            col = tool_input["col"]
-            memory_info, location, coords = self.emulator.get_state_from_memory()
-            self.text_display.add_message(f"[Navigation] Navigating to: ({col}, {row})")  # 8, 3 -> 6, 4 is 2, 5
-            
-            # The navigator goes to location on screen, with 0,0 at the top left.
-            local_col = col - coords[0] + 4
-            local_row = row - coords[1] + 4
-
-            status, path = self.emulator.find_path(local_row, local_col)
-            last_coords = coords
-            next_coords = coords
-            if path:
-                for direction in path:
-                    self.emulator.press_buttons([direction], True, wait_for_finish=False)
-                    cur_coords = self.emulator.get_coordinates()
-                    if cur_coords != next_coords:
-                        last_coords = next_coords
-                        next_coords = cur_coords
-                self.last_coords = last_coords
-                result = f"Navigation successful: followed path with {len(path)} steps"
-            else:
-                result = f"Navigation failed: {status}"
-            
-            # Get game state from memory after the action
-            memory_info, location, coords = self.emulator.get_state_from_memory()
-
-            # Get a fresh screenshot after executing the buttons
-            screenshot = self.emulator.get_screenshot()
-            screenshot_b64 = self.get_screenshot_base64(screenshot, upscale=4, add_coords=True, player_coords=coords, location=location)
-            
-            # Log the memory state after the tool call
-            logger.info(f"[Memory State after action]")
-            logger.info(memory_info)
-            
-            collision_map = self.emulator.get_collision_map()
-            if collision_map:
-                logger.info(f"[Collision Map after action]\n{collision_map}")
-
-            # TODO: Maybe python has good queues for this, but queue is not iterable for display
-            self.location_history.insert(0, (location, coords))
-            if len(self.location_history) > self.location_history_length:
-                self.location_history.pop()
-            if self.location_tracker_activated:
-                if coords[0] >= 0 or coords[1] >= 0:
-                    # Covers edge cases, principally when moving between areas.
-                    cols = self.location_tracker.setdefault(location, [])
-                    # This is leaning hard on Python list append optimization... Maybe there are better structures?
-                    # col first
-                    if coords[0] > len(cols) - 1:
-                        if len(cols) == 0:
-                            cols.extend(list() for _ in range(0, coords[0] + 1))  # Note that you can't do []*coords[0], because then the same list goes into each entry
-                        else:
-                            cols.extend([False for _ in range(0, len(cols[0]))] for _ in range(0, coords[0]))
-                    if coords[1] > len(cols[0]) - 1:
-                        # this is awkward
-                        for col in cols:
-                            # This is actually too much (it would be coords[1] - len(col) + 1) but the overallocation is probably a good idea.
-                            col.extend(False for _ in range(0, coords[1] + 1))
-                    cols[coords[0]][coords[1]] = True
-
-                    # TODO: eventually do this more reasonably. For now we do this extraordinarily dumb approach.
-                    all_labels = self.get_all_location_labels(location)
-
-                    # Return tool result as a dictionary
-                    # Simplified: detailed_navigator_mode removed.
-                    screenshot = self.emulator.get_screenshot()
-                    screenshot_b64 = self.get_screenshot_base64(screenshot, upscale=4, add_coords=True, player_coords=coords, location=location)
-                    last_checkpoints = '\n'.join(self.checkpoints[-10:])
-                    # Standardized content structure for navigate_to tool result
-                    content = [
-                            {"type": "text", "text": f"Navigation result: {result}"},
-                            {"type": "text", "text": f"\nGame state information from memory after your action:\n{memory_info}"},
-                            {"type": "text", "text": f"\nLabeled nearby locations: {','.join(f'{coords}: {label}' for coords, label in all_labels)}"},
-                            {"type": "text", "text": f"Here are up to your last {str(self.location_history_length)} locations between commands (most recent first), to help you remember where you've been:/n{'/n'.join(f'{x[0]}, {x[1]}' for x in self.location_history)}"},
-                            {"type": "text", "text": f"Here are your last 10 checkpoints:\n{last_checkpoints}"},
-                            {"type": "text", "text": f"You have been in this location for {self.steps_since_location_shift} steps"}
-                        ]
-                    return {
-                        "type": "tool_result",
-                        "tool_use_id": tool_id,
-                        "content": content,
-                    }
-                else:
-                    screenshot = self.emulator.get_screenshot()
-                    screenshot_b64 = self.get_screenshot_base64(screenshot, upscale=4, add_coords=True, player_coords=coords, location=location)
-                    last_checkpoints = '\n'.join(self.checkpoints[-10:])
-                    content = [
-                            {"type": "text", "text": f"Navigation result: {result}"},
-                            {"type": "text", "text": "\nHere is a screenshot of the screen after navigation:"},
-                            {
-                                "type": "image_url", 
-                                "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}
-                            },
-                            {"type": "text", "text": f"\nGame state information from memory after your action:\n{memory_info}"},
-                            {"type": "text", "text": f"\nLabeled nearby locations: {','.join(f'{coords}: {label}' for coords, label in all_labels)}"},
-                            {"type": "text", "text": f"Here are up to your last {str(self.location_history_length)} locations between commands (most recent first), to help you remember where you've been:/n{'/n'.join(f'{x[0]}, {x[1]}' for x in self.location_history)}"},
-                            {"type": "text", "text": f"Here are your last 10 checkpoints:\n{last_checkpoints}"},
-                            {"type": "text", "text": f"You have been in this location for {self.steps_since_location_shift} steps"}
-                        ]
-                    if not self.emulator.get_in_combat() and self.use_full_collision_map:
-                        content.append({"type": "text", "text": "Here is an text_based map of this RAM location compiled so far:\n\n" + self.update_and_get_full_collision_map(location, coords)})
-                    # Removed combat check related to detailed_navigator_mode.
-                    return {
-                        "type": "tool_result",
-                        "tool_use_id": tool_id,
-                        "content": content,
-                    }
+            tool_content_str = self._execute_navigate_to(tool_input, tool_id)
         elif tool_name == "navigate_to_offscreen_coordinate":
-            row = tool_input["row"]
-            col = tool_input["col"]
-            memory_info, location, coords = self.emulator.get_state_from_memory()
-            full_map = self.update_and_get_full_collision_map(location, coords)
-            
-            final_distance = self.full_collision_map[location].distances.get((col, row))
-            if final_distance is None:
-                 return {
-                    "type": "tool_result",
-                    "tool_use_id": tool_id,
-                    "content": [
-                        {"type": "text", "text": f"Invalid coordinates; Navigation too far or not possible."}
-                    ],
-                }
-
-            if DIRECT_NAVIGATION:
-                self.text_display.add_message(f"Navigating with existing map...")
-                buttons = self.full_collision_map[location].generate_buttons_to_coord(col, row)
-                wait = True
-            else:
-                query = f"""Please take a look at the attached text_based map.
-
-    Please consider in detail how the player character (labeled PP) can reach the coordinate ({col},{row}). Keep the following in mind:
-
-#### SPECIAL NAVIGATION INSTRUCTIONS WHEN TRYING TO REACH A LOCATION #####
-Pay attention to the following procedure when trying to reach a specific location (if you know the coordinates).
-1. Inspect the text_based map
-2. Find where your destination is on the map using the coordinate system (column, row).
-3. Trace a path from there back to the player character (PP) following the StepsToReach numbers on the map, in descending order.
-    3a. So if your destination is StepsToReach 20, then it is necessary to go through StepsToReach 19, StepsToReach 18...descending all the way to 1 and then PP.
-4. Navigate via the REVERSE of this path.
-###########################################
-
-
-
-    Think through your movement like this
-
-    To get to (col, row),
-    1. I would move left from (col, row)
-    2. To get there, I would move up from (col, row)
-    etc.
-
-    MAKE SURE TO PRINT OUT THE ENTIRE PATH IN TEXT. AND DOUBLE-CHECK WHETHER YOUR ARE PASSING THROUGH IMPASSABLE TILES.
-
-    then use the provided "press_buttons" tool to send the necessary commands. Remember that it will be in reverse order.
-
-    """ + full_map
-
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": query,
-                            }
-                        ],
-                    }
-                ]
-                # This section now uses self.sambanova_client for the sub-LLM call.
-                # It will use the SAMBANOVA_STRATEGIST_MODEL_ID as it's a reasoning task.
-                messages_for_nav_assist = [
-                    {"role": "system", "content": "You are an expert navigator. Your task is to determine the sequence of button presses to reach a coordinate based on a map. Follow the path rules strictly."},
-                    {"role": "user", "content": query} # query already contains the map and instructions
-                ]
-                try:
-                    response = self.sambanova_client.chat.completions.create(
-                        model=SAMBANOVA_STRATEGIST_MODEL_ID,
-                        messages=messages_for_nav_assist,
-                        tools=[DISTANT_NAVIGATOR_BUTTONS_OPENAI], # Ensure this is defined in OpenAI format
-                        tool_choice="auto", # Let the model decide if it needs to call the tool
-                        temperature=TEMPERATURE, # Could be lower for more deterministic navigation
-                        max_tokens=MAX_TOKENS 
-                    )
-                    
-                    nav_assistant_msg = response.choices[0].message
-                    if nav_assistant_msg.tool_calls:
-                        nav_tool_call = nav_assistant_msg.tool_calls[0] # Expecting one tool call for buttons
-                        if nav_tool_call.function.name == "press_buttons":
-                            nav_tool_input = json.loads(nav_tool_call.function.arguments)
-                            buttons = nav_tool_input["buttons"]
-                            wait = nav_tool_input.get("wait", True)
-                            self.text_display.add_message(f"Distant Navigator Advice: Pressing {buttons}")
-                        else:
-                            logger.error(f"Distant navigator returned unexpected tool: {nav_tool_call.function.name}")
-                            buttons = [] # Fallback
-                            wait = True
-                    else:
-                        # Model decided not to use tool, might have text response
-                        text_response = nav_assistant_msg.content if nav_assistant_msg.content else "No buttons provided by distant navigator."
-                        self.text_display.add_message(f"Distant Navigator Text Response: {text_response}")
-                        logger.warn(f"Distant navigator did not call press_buttons. Response: {text_response}")
-                        buttons = [] # Fallback
-                        wait = True
-                except Exception as e:
-                    logger.error(f"Error calling SambaNova for distant navigation assist: {e}")
-                    buttons = [] # Fallback
-                    wait = True
-            return self.press_buttons(buttons, wait, tool_id) # tool_id is from the original tool_call
-         
+            tool_content_str = self._execute_navigate_to_offscreen_coordinate(tool_input, tool_id)
         elif tool_name == "bookmark_location_or_overwrite_label":
-            location = tool_input["location"]
-            row = tool_input["row"]
-            col = tool_input["col"]
-            label = tool_input["label"]
-            self.text_display.add_message(f"Logging {location},  ({col}, {row}) as {label}")
-            self.label_archive.setdefault(location.lower(), {}).setdefault(row, {})[col] = label
-            return {
-                "type": "tool_result",
-                "tool_use_id": tool_id,
-                "content": [
-                    {"type": "text", "text": f"Location Labeled: {location}, ({col}, {row}) as {label}"}
-                ],
-            }
+            tool_content_str = self._execute_bookmark_location(tool_input, tool_id)
         elif tool_name == "mark_checkpoint":
-            self.steps_since_checkpoint = 0
-            self.steps_since_label_reset = 0
-            self.location_tracker_activated = False
-            achievement = tool_input["achievement"]
-            self.checkpoints.append(achievement)
-            self.text_display.add_message(f"Checkpoint marked: {achievement}")
-            return {
-                "type": "tool_result",
-                "tool_use_id": tool_id,
-                "content": [
-                    {"type": "text", "text": f"Checkpoint set!"}
-                ],
-            }
+            tool_content_str = self._execute_mark_checkpoint(tool_input, tool_id)
         elif tool_name == "navigation_assistance":
-            # Currently not used
-            assist_str = self.navigation_assistance(tool_input["navigation_goal"])
-            return {
-                "type": "tool_result",
-                "tool_use_id": tool_id,
-                "content": [
-                    {"type": "text", "text": assist_str}
-                ],
-            }
-        elif tool_name == "detailed_navigator":
-            self.detailed_navigator_mode = True
-            self.navigation_location = self.emulator.get_location()
-            self.navigator_message_history = [{"role": "user", "content": "Please begin navigating!"}]
-            self.openai_navigator_message_history = [{"role": "user", "content": "Please begin navigating!"}]
-            return {
-                "type": "tool_result",
-                "tool_use_id": tool_id,
-                "content": [
-                    {"type": "text", "text": "Navigator Mode Activated."}
-                ],
-            }
+            tool_content_str = self._execute_navigation_assistance(tool_input, tool_id)
+        # elif tool_name == "detailed_navigator": # detailed_navigator tool is currently not being refactored as per plan
+            # tool_content_str = self._execute_detailed_navigator(tool_input, tool_id)
+            # Placeholder
+            # self.detailed_navigator_mode = True
+            # self.navigation_location = self.emulator.get_location()
+            # self.navigator_message_history = [{"role": "user", "content": "Please begin navigating!"}] # Reset history
+            # self.openai_navigator_message_history = [{"role": "user", "content": "Please begin navigating!"}] # Reset history
+            # tool_content_str = "Navigator Mode Activated."
         else:
             logger.error(f"Unknown tool called: {tool_name}")
-            return {
-                "type": "tool_result",
-                "tool_use_id": tool_id,
-                "content": [
-                    {"type": "text", "text": f"Error: Unknown tool '{tool_name}'"}
-                ],
-            }
+            tool_content_str = f"Error: Unknown tool '{tool_name}'"
+
+        return {
+            "role": "tool",
+            "tool_call_id": tool_id,
+            "name": tool_name,
+            "content": tool_content_str, # This must be a string
+        }
+
+    def _execute_press_buttons(self, tool_input: dict, tool_id: str) -> str:
+        """Executes the 'press_buttons' tool, updates state, and returns string content for the tool result."""
+        buttons = tool_input["buttons"]
+        wait = tool_input.get("wait", True)
+        self.text_display.add_message(f"[Buttons] Pressing: {buttons} (wait={wait})")
+        
+        button_press_screen_text, self.last_coords = self.emulator.press_buttons(buttons, wait)
+        
+        memory_info, location, coords = self.emulator.get_state_from_memory()
+        logger.info(f"[Memory State after action]\n{memory_info}")
+        
+        collision_map_text = self.emulator.get_collision_map()
+        if collision_map_text: # Check if it's not None or empty
+            logger.info(f"[Collision Map after action]\n{collision_map_text}")
+
+        self.location_history.insert(0, (location, coords))
+        if len(self.location_history) > self.location_history_length:
+            self.location_history.pop()
+        
+        if self.location_tracker_activated and coords[0] >=0 and coords[1] >=0 : # Ensure coords are valid
+            cols = self.location_tracker.setdefault(location, [])
+            if coords[0] >= len(cols):
+                for _ in range(len(cols), coords[0] + 1):
+                    cols.append([]) # Add new empty columns
+            
+            # Ensure all columns up to player_coords[0] have enough rows
+            for c_idx in range(coords[0] + 1):
+                while coords[1] >= len(cols[c_idx]):
+                    cols[c_idx].append(False) # Pad rows with False
+            cols[coords[0]][coords[1]] = True
+
+
+        all_labels_text = ', '.join(f'{label_coords}: {label}' for label_coords, label in self.get_all_location_labels(location))
+        
+        # Construct the string content for the tool result
+        # Optionally include screenshot and map if deemed essential for the next LLM call
+        # For now, keeping it concise. The main run loop already adds a screenshot for the Vision step.
+        content_str = (
+            f"Pressed buttons: {', '.join(buttons)}. Screen text after press: {button_press_screen_text}. "
+            f"New game state: Location {location} at {coords}. RAM: {memory_info}. "
+            f"Labeled nearby locations: {all_labels_text}. "
+            f"Steps in location: {self.steps_since_location_shift}."
+        )
+
+        # Append map if not in combat and map is enabled
+        if not self.emulator.get_in_combat() and self.use_full_collision_map:
+            full_map_ascii = self.update_and_get_full_collision_map(location, coords)
+            content_str += f"\nUpdated Text Map:\n[TEXT_MAP]\n{full_map_ascii}\n[/TEXT_MAP]"
+            
+        # Consider adding a screenshot if it's particularly important for this tool's result
+        # screenshot = self.emulator.get_screenshot()
+        # screenshot_b64 = self.get_screenshot_base64(screenshot, upscale=1, add_coords=True, player_coords=coords, location=location)
+        # content_str += f"\nScreenshot after press (base64): {screenshot_b64}"
+        
+        return content_str
+
+    def _execute_navigate_to(self, tool_input: dict, tool_id: str) -> str:
+        """Executes the 'navigate_to' tool, updates state, and returns string content for the tool result."""
+        row = tool_input["row"]
+        col = tool_input["col"]
+        
+        _, current_location_before_nav, coords_before_nav = self.emulator.get_state_from_memory()
+        self.text_display.add_message(f"[Navigation] Attempting to navigate from {coords_before_nav} in {current_location_before_nav} to onscreen coordinate: ({col}, {row})")
+
+        # The navigator expects target coordinates relative to the screen (0,0 top-left)
+        # Player is at screen center (4,4) effectively.
+        # Input col, row are absolute game coordinates. We need to convert them to screen-relative for find_path.
+        # If target col=5, row=5 and player is at col=3, row=3 (absolute), then on screen target is col=5-3+4=6, row=5-3+4=6
+        local_col_target = col - coords_before_nav[0] + 4 
+        local_row_target = row - coords_before_nav[1] + 4
+
+        status, path = self.emulator.find_path(local_row_target, local_col_target)
+        
+        result_summary = ""
+        if path:
+            self.text_display.add_message(f"[Navigation] Path found: {path}. Executing...")
+            # Similar to _execute_press_buttons, but path is a list of directional button strings
+            for direction_button in path:
+                # We call press_buttons with wait=True for each step to ensure game state consistency.
+                # The internal press_buttons of emulator handles waiting for game processing.
+                _, self.last_coords = self.emulator.press_buttons([direction_button], wait=True, wait_for_finish=False) # wait_for_finish=False as each step is small
+            result_summary = f"Navigation successful: followed path with {len(path)} steps: {', '.join(path)}."
+        else:
+            result_summary = f"Navigation failed: {status}."
+            self.text_display.add_message(f"[Navigation] Path not found: {status}")
+
+        # Get game state from memory after the action
+        memory_info, new_location, new_coords = self.emulator.get_state_from_memory()
+        logger.info(f"[Memory State after navigation action]\n{memory_info}")
+
+        self.location_history.insert(0, (new_location, new_coords))
+        if len(self.location_history) > self.location_history_length:
+            self.location_history.pop()
+        
+        if self.location_tracker_activated and new_coords[0] >=0 and new_coords[1] >=0: # Ensure coords are valid
+            cols = self.location_tracker.setdefault(new_location, [])
+            if new_coords[0] >= len(cols):
+                for _ in range(len(cols), new_coords[0] + 1): cols.append([])
+            for c_idx in range(new_coords[0] + 1):
+                while new_coords[1] >= len(cols[c_idx]): cols[c_idx].append(False)
+            cols[new_coords[0]][new_coords[1]] = True
+
+        all_labels_text = ', '.join(f'{label_coords}: {label}' for label_coords, label in self.get_all_location_labels(new_location))
+
+        content_str = (
+            f"{result_summary} "
+            f"Original target: ({col},{row}). Ended at Location {new_location} at {new_coords}. RAM: {memory_info}. "
+            f"Labeled nearby locations: {all_labels_text}. "
+            f"Steps in location: {self.steps_since_location_shift}."
+        )
+        
+        if not self.emulator.get_in_combat() and self.use_full_collision_map:
+            full_map_ascii = self.update_and_get_full_collision_map(new_location, new_coords)
+            content_str += f"\nUpdated Text Map:\n[TEXT_MAP]\n{full_map_ascii}\n[/TEXT_MAP]"
+
+        return content_str
+
+    def _execute_navigate_to_offscreen_coordinate(self, tool_input: dict, tool_id: str) -> str:
+        """Executes 'navigate_to_offscreen_coordinate', potentially using an LLM for pathfinding, and returns string content."""
+        row = tool_input["row"]
+        col = tool_input["col"]
+        
+        _, location, coords = self.emulator.get_state_from_memory()
+        # Ensure the map for the current location is up-to-date and get its ASCII representation.
+        # This also updates self.full_collision_map[location].distances
+        full_map_ascii = self.update_and_get_full_collision_map(location, coords) 
+
+        final_distance = self.full_collision_map[location].distances.get((col, row))
+
+        if final_distance is None:
+            self.text_display.add_message(f"[Navigation Offscreen] Target ({col},{row}) is too far or path not found in current map data.")
+            return f"Navigation to offscreen coordinate ({col},{row}) failed: Target is too far or path not found in current map data."
+
+        buttons_to_press = None
+        navigation_method_log = ""
+
+        if DIRECT_NAVIGATION:
+            self.text_display.add_message(f"[Navigation Offscreen] Attempting direct navigation with existing map to ({col},{row}).")
+            buttons_to_press = self.full_collision_map[location].generate_buttons_to_coord(col, row)
+            if buttons_to_press:
+                navigation_method_log = f"Used direct navigation. Path: {buttons_to_press}"
+            else:
+                navigation_method_log = "Direct navigation failed to find a path."
+        
+        if not buttons_to_press: # Fallback to LLM or if DIRECT_NAVIGATION is false
+            self.text_display.add_message(f"[Navigation Offscreen] Using LLM to find path to ({col},{row}).")
+            navigation_method_log = "Using LLM for navigation."
+            # Construct query for LLM (similar to existing logic)
+            query = f"""Please take a look at the attached text_based map.
+Current player location is PP. Target coordinate is ({col},{row}).
+[TEXT_MAP]
+{full_map_ascii}
+[/TEXT_MAP]
+Consider in detail how the player character (labeled PP) can reach the coordinate ({col},{row}). 
+Follow path rules: Trace a path from destination back to player (PP) using StepsToReach numbers in descending order.
+Then, provide the sequence of button presses (e.g., ["up", "left", "a"]) to navigate via the REVERSE of this path using the 'press_buttons' tool.
+Output ONLY the JSON for the 'press_buttons' tool call, like {"{'buttons': ['up', 'left']}"}.
+"""
+            messages_for_nav_assist = [
+                {"role": "system", "content": "You are an expert navigator. Your task is to determine the sequence of button presses to reach a coordinate based on a map. Follow the path rules strictly. Output only the JSON for the 'press_buttons' tool call."},
+                {"role": "user", "content": query}
+            ]
+            try:
+                response = self.sambanova_client.chat.completions.create(
+                    model=SAMBANOVA_STRATEGIST_MODEL_ID, # Using strategist for this complex reasoning
+                    messages=messages_for_nav_assist,
+                    # We expect the LLM to generate arguments for "press_buttons", not call a tool itself here.
+                    # The original implementation used a tool definition for the navigator, but here we want JSON output.
+                    temperature=TEMPERATURE, 
+                    max_tokens=MAX_TOKENS # Max tokens for a list of buttons
+                )
+                
+                llm_output_text = response.choices[0].message.content if response.choices[0].message.content else ""
+                self.text_display.add_message(f"[Navigation Offscreen] LLM response: {llm_output_text}")
+
+                try:
+                    # The LLM should output a JSON string that looks like the arguments for press_buttons
+                    # e.g., "{'buttons': ['up', 'left', 'a']}"
+                    # We need to parse this carefully.
+                    # A safer way: ask the LLM to output *just* the list of buttons as a JSON list string.
+                    # For now, assuming it might output the full tool call structure.
+                    
+                    # Attempt to extract buttons if LLM provides a JSON string for tool args
+                    # A simple heuristic: try to find a JSON list within the response.
+                    import re
+                    match = re.search(r'\[\s*("?\w+"?\s*,\s*)*"?\w+"?\s*\]', llm_output_text)
+                    if match:
+                        buttons_json_str = match.group(0)
+                        try:
+                            extracted_buttons = json.loads(buttons_json_str)
+                            if isinstance(extracted_buttons, list) and all(isinstance(b, str) for b in extracted_buttons):
+                                buttons_to_press = extracted_buttons
+                                navigation_method_log += f" LLM provided buttons: {buttons_to_press}."
+                            else:
+                                navigation_method_log += " LLM output valid JSON list, but not of strings."
+                        except json.JSONDecodeError:
+                             navigation_method_log += f" LLM output looked like a list but failed JSON parsing: {buttons_json_str}."
+                    else:
+                        navigation_method_log += f" LLM did not provide a clear list of buttons in its response: {llm_output_text}."
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"Distant navigator LLM output was not valid JSON for buttons: {llm_output_text}. Error: {e}")
+                    navigation_method_log += f" LLM output parsing failed: {e}."
+                except Exception as e: # Catch any other error during LLM response processing
+                    logger.error(f"Error processing LLM response for navigation: {e}")
+                    navigation_method_log += f" Error processing LLM response: {e}."
+
+            except Exception as e:
+                logger.error(f"Error calling SambaNova for distant navigation assist: {e}")
+                navigation_method_log += f" LLM call failed: {e}."
+
+        if buttons_to_press:
+            self.text_display.add_message(f"[Navigation Offscreen] Executing buttons from {navigation_method_log.split('.')[0]}: {buttons_to_press}")
+            # Call _execute_press_buttons to actually press them and get its rich string output
+            # The 'tool_id' for _execute_press_buttons should be the original tool_id for navigate_to_offscreen_coordinate
+            press_buttons_result_str = self._execute_press_buttons({"buttons": buttons_to_press, "wait": True}, tool_id)
+            return f"Navigate to offscreen coordinate ({col},{row}) using {navigation_method_log}\nExecution result:\n{press_buttons_result_str}"
+        else:
+            self.text_display.add_message(f"[Navigation Offscreen] Failed to determine buttons for ({col},{row}). Method: {navigation_method_log}")
+            return f"Navigation to offscreen coordinate ({col},{row}) failed. Could not determine button sequence. Method: {navigation_method_log}"
+
+    def _execute_bookmark_location(self, tool_input: dict, tool_id: str) -> str:
+        """Executes the 'bookmark_location_or_overwrite_label' tool and returns string content."""
+        location = tool_input["location"]
+        row_val = tool_input["row"]
+        col_val = tool_input["col"]
+        label = tool_input["label"]
+        
+        self.text_display.add_message(f"[Bookmark] Logging {location}, ({col_val}, {row_val}) as '{label}'")
+        self.label_archive.setdefault(location.lower(), {}).setdefault(row_val, {})[col_val] = label
+        
+        return f"Location Labeled: {location}, ({col_val}, {row_val}) as '{label}'."
+
+    def _execute_mark_checkpoint(self, tool_input: dict, tool_id: str) -> str:
+        """Executes the 'mark_checkpoint' tool and returns string content."""
+        achievement = tool_input["achievement"]
+        
+        self.steps_since_checkpoint = 0
+        self.steps_since_label_reset = 0 # Resetting this might be too aggressive, depends on desired behavior
+        self.location_tracker_activated = False # Deactivate detailed tracker on new checkpoint
+        self.checkpoints.append(achievement)
+        
+        self.text_display.add_message(f"[Checkpoint] Marked: {achievement}")
+        return f"Checkpoint set: '{achievement}'."
+
+    def _execute_navigation_assistance(self, tool_input: dict, tool_id: str) -> str:
+        """Executes the 'navigation_assistance' tool (which calls an LLM) and returns string content."""
+        navigation_goal = tool_input["navigation_goal"]
+        self.text_display.add_message(f"[Nav Assist] Requested for goal: {navigation_goal}")
+        
+        # The self.navigation_assistance method already handles the LLM call and logging.
+        # It returns a string, which is exactly what we need for tool_content_str.
+        assistance_text = self.navigation_assistance(navigation_goal) 
+        
+        # The text_display message for the result is handled within self.navigation_assistance
+        return assistance_text
 
 
     def run(self, num_steps=1, save_every=10, save_file_name: Optional[str] = None, _running_in_thread=False):
@@ -1057,18 +1075,12 @@ Pay attention to the following procedure when trying to reach a specific locatio
                 token_usage = 0
                 
                 self.strip_text_map_and_images_from_history(self.message_history)
-                messages_for_api = copy.deepcopy(self.message_history)
-                
-                # Determine Task and Model
-                current_task_requires_vision = not self.emulator.get_in_combat() and (self.steps_since_location_shift < 2 or self.steps_since_checkpoint < 3 or self.steps_since_label_reset < 3) # Heuristic
-                model_id_to_use = SAMBANOVA_VISION_MODEL_ID if current_task_requires_vision else SAMBANOVA_TOOL_MODEL_ID
-                
-                # Construct user message content parts
-                user_content_parts = []
+                token_usage = 0 # Initialize token usage for the turn.
+
+                # Prepare base game state information
                 memory_info, current_location, current_coords = self.emulator.get_state_from_memory()
                 all_labels_text = ', '.join(f'{cl}: {lab}' for cl, lab in self.get_all_location_labels(current_location))
                 last_checkpoints_text = '\n'.join(self.checkpoints[-10:])
-                
                 game_state_text = (
                     f"Current Location: {current_location} at Coords: {current_coords}. In Combat: {self.emulator.get_in_combat()}\n"
                     f"Memory Info: {memory_info}\n"
@@ -1076,156 +1088,174 @@ Pay attention to the following procedure when trying to reach a specific locatio
                     f"Last 10 Checkpoints: {last_checkpoints_text}\n"
                     f"Steps since last location shift: {self.steps_since_location_shift}. Steps since checkpoint: {self.steps_since_checkpoint}."
                 )
-                user_content_parts.append({"type": "text", "text": game_state_text})
-
                 if not self.emulator.get_in_combat():
                     map_text = self.update_and_get_full_collision_map(current_location, current_coords)
-                    user_content_parts.append({"type": "text", "text": f"\n[TEXT_MAP]\n{map_text}\n[/TEXT_MAP]\n"})
+                    game_state_text += f"\n[TEXT_MAP]\n{map_text}\n[/TEXT_MAP]\n"
 
-                if model_id_to_use == SAMBANOVA_VISION_MODEL_ID:
-                    screenshot = self.emulator.get_screenshot()
-                    screenshot_b64 = self.get_screenshot_base64(screenshot, upscale=1, add_coords=True, player_coords=current_coords, location=current_location)
-                    user_content_parts.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}
-                    })
-                    user_content_parts.append({"type": "text", "text": "\nAnalyze the current game screen and state. Your primary goal is to progress in the game. Decide the next best action or set of actions. Use tools if appropriate. Explain your reasoning before acting."})
-                else: # SAMBANOVA_TOOL_MODEL_ID
-                     user_content_parts.append("\nBased on the current game state, decide the next best action or set of actions to progress in the game. Use tools if appropriate.")
+                # --- VISION STEP ---
+                logger.info("--- VISION STEP ---")
+                vision_model_input_messages = copy.deepcopy(self.message_history)
                 
-                # Add the fully constructed user message to messages_for_api
-                messages_for_api.append({"role": "user", "content": user_content_parts})
-                
-                # Ensure the first message is a system prompt if self.message_history was empty or cleared.
-                if not messages_for_api or messages_for_api[0].get("role") != "system":
-                    system_prompt_content = SYSTEM_PROMPT if SYSTEM_PROMPT else "You are an AI agent playing a game. Your primary goal is to explore the game world and progress. Reason about the game state and decide on the best course of action. Use tools if appropriate. Explain your thought process."
-                    messages_for_api.insert(0, {"role": "system", "content": system_prompt_content })
+                # Construct user message for Vision model
+                vision_user_content_parts = [{"type": "text", "text": game_state_text}]
+                screenshot = self.emulator.get_screenshot()
+                screenshot_b64 = self.get_screenshot_base64(screenshot, upscale=1, add_coords=True, player_coords=current_coords, location=current_location)
+                vision_user_content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}
+                })
+                vision_user_content_parts.append({"type": "text", "text": PURE_VISION_PROMPT}) # Placeholder for actual vision prompt
 
-                logger.info(f"Calling Vision/Tool Model: {model_id_to_use}. Messages count: {len(messages_for_api)}")
+                vision_model_input_messages.append({"role": "user", "content": vision_user_content_parts})
                 
-                vision_tool_model_tool_calls = None
-                vision_tool_model_response_text = ""
-                strategist_acted_this_turn = False # Flag to skip general tool processing if strategist acts
+                # Ensure system prompt
+                if not vision_model_input_messages or vision_model_input_messages[0].get("role") != "system":
+                    vision_model_input_messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT}) # Generic system prompt for now
 
+                vision_model_response_text = ""
                 try:
-                    response = self.sambanova_client.chat.completions.create(
-                        model=model_id_to_use,
-                        messages=messages_for_api,
-                        tools=OPENAI_TOOLS if model_id_to_use == SAMBANOVA_TOOL_MODEL_ID else None, # Changed to OPENAI_TOOLS
-                        tool_choice="auto" if model_id_to_use == SAMBANOVA_TOOL_MODEL_ID else None,
+                    response_vision = self.sambanova_client.chat.completions.create(
+                        model=SAMBANOVA_VISION_MODEL_ID,
+                        messages=vision_model_input_messages,
                         temperature=TEMPERATURE,
-                        max_tokens=MAX_TOKENS 
+                        max_tokens=MAX_TOKENS
                     )
-                    token_usage = response.usage.total_tokens if response.usage else 0 # Accumulate token usage
-                    logger.info(f"SambaNova Vision/Tool Model ({model_id_to_use}) response usage: {token_usage} tokens.")
+                    token_usage += response_vision.usage.total_tokens if response_vision.usage else 0
+                    vision_model_response_text = response_vision.choices[0].message.content if response_vision.choices[0].message.content else ""
+                    logger.info(f"SambaNova Vision Model response usage: {response_vision.usage.total_tokens if response_vision.usage else 'N/A'} tokens.")
+                    self.text_display.add_message(f"[Vision Model Text] {vision_model_response_text}")
 
-                    response_message = response.choices[0].message
-                    vision_tool_model_tool_calls = response_message.tool_calls
-                    vision_tool_model_response_text = response_message.content if response_message.content else ""
-                    
-                    # Update history with the user message that was sent to the vision/tool model
-                    self.message_history.append(messages_for_api[-1])
-                    
-                    # Prepare and add assistant's response (text and tool calls from vision/tool model) to history
-                    assistant_message_for_history = {"role": "assistant"}
-                    assistant_content_parts = []
-                    if vision_tool_model_response_text:
-                        assistant_content_parts.append({"type": "text", "text": vision_tool_model_response_text})
-                        self.text_display.add_message(f"[Vision/Tool Model Text] {vision_tool_model_response_text}")
-                    if vision_tool_model_tool_calls:
-                        assistant_message_for_history["tool_calls"] = vision_tool_model_tool_calls
-                        for tc in vision_tool_model_tool_calls:
-                            self.text_display.add_message(f"[Vision/Tool Model Tool Call] Requesting: {tc.function.name} ID: {tc.id} Args: {tc.function.arguments}")
-                    
-                    if assistant_content_parts: # Add text content if it exists
-                        assistant_message_for_history["content"] = assistant_content_parts
-                    elif not vision_tool_model_tool_calls : # No text and no tool calls, ensure content is not None for OpenAI SDK
-                         assistant_message_for_history["content"] = "" # Or None, if the SDK handles it. Empty string is safer.
-                    
-                    self.message_history.append(assistant_message_for_history)
+                    # Update history with Vision model's input and output
+                    self.message_history.append(vision_model_input_messages[-1]) # User message to Vision model
+                    self.message_history.append({"role": "assistant", "content": vision_model_response_text})
 
                 except Exception as e:
-                    logger.error(f"Error calling SambaNova Vision/Tool Model ({model_id_to_use}): {e}", exc_info=True)
-                    vision_tool_model_response_text = f"Error interacting with Vision/Tool LLM: {e}"
-                    # Update history with user turn and error from assistant
-                    self.message_history.append(messages_for_api[-1]) # User message
-                    self.message_history.append({"role": "assistant", "content": vision_tool_model_response_text})
-
-
-                # STRATEGIST MODEL CALL (if not in combat and vision/tool model didn't request immediate critical tools)
-                # Condition to call strategist: Not in combat, AND ( (vision model gave some description AND no tools) OR (heuristic like few steps in loc) )
-                # For now, let's simplify: call if not in combat and vision model provided some text.
-                if not self.emulator.get_in_combat() and vision_tool_model_response_text and not vision_tool_model_tool_calls:
-                    game_state_summary_strat = "\n".join(self.checkpoints[-10:]) if self.checkpoints else "No checkpoints recorded yet."
-                    # current_vision_text_description is vision_tool_model_response_text
-                    formatted_loc_hist_strat = "\n".join([f'{ln} @ {cd}' for ln, cd in self.location_history[:5]])
-                    all_labels_strat = self.get_all_location_labels(current_location) # current_location from above
-                    formatted_labels_strat = "\n".join([f'{lc}: {lt}' for lc, lt in all_labels_strat[:5]])
-                    current_objective_strat = self.checkpoints[-1] if self.checkpoints else "Explore the area and make progress."
-
-                    strategist_prompt_filled = SAMBANOVA_STRATEGIST_PROMPT.format(
-                        game_state_summary=game_state_summary_strat,
-                        screen_description=vision_tool_model_response_text, # Output from the vision model
-                        player_coords=str(current_coords), # current_coords from above
-                        location=current_location,
-                        location_history=formatted_loc_hist_strat,
-                        labeled_locations=formatted_labels_strat,
-                        current_objective=current_objective_strat
-                    )
-                    
-                    self.text_display.add_message("[Text] Asking strategist for a plan...")
-                    # For strategist, we typically don't send the whole history, just the formatted prompt.
-                    strategist_call_messages = [{"role": "user", "content": strategist_prompt_filled}]
-                    # The SAMBANOVA_STRATEGIST_PROMPT itself can act as a system prompt if formatted correctly
-                    # or add a system message if needed:
-                    # strategist_call_messages.insert(0, {"role": "system", "content": "You are a game strategist..."})
-
-                    try:
-                        strategist_response = self.sambanova_client.chat.completions.create(
-                            model=SAMBANOVA_STRATEGIST_MODEL_ID,
-                            messages=strategist_call_messages,
-                            temperature=TEMPERATURE, 
-                            max_tokens=MAX_TOKENS, # Or a smaller value for button list
-                        )
-                        token_usage += strategist_response.usage.total_tokens if strategist_response.usage else 0
-                        strategist_output_text = strategist_response.choices[0].message.content
-                        # Add strategist interaction to history
-                        self.message_history.append({"role": "user", "content": strategist_prompt_filled}) # User prompt to strategist
-                        self.message_history.append({"role": "assistant", "content": strategist_output_text}) # Strategist raw response
-                        self.text_display.add_message(f"[Text] Strategist response: {strategist_output_text}")
-
-                        try:
-                            planned_buttons = json.loads(strategist_output_text)
-                            if isinstance(planned_buttons, list) and all(isinstance(b, str) for b in planned_buttons) and planned_buttons:
-                                self.text_display.add_message(f"[Strategist Plan] Executing buttons: {planned_buttons}")
-                                _, self.last_coords = self.emulator.press_buttons(planned_buttons, wait=True)
-                                # Update game state after planned buttons
-                                memory_info, current_location, current_coords = self.emulator.get_state_from_memory() # Refresh state
-                                self.location_history.insert(0, (current_location, current_coords))
-                                if len(self.location_history) > self.location_history_length: self.location_history.pop()
-                                # Add observation of action to history for next turn context
-                                self.message_history.append({
-                                    "role": "user", # Or "observation" if we make that a role
-                                    "content": f"Executed strategist plan: {planned_buttons}. New location: {current_location} @ {current_coords}. RAM: {memory_info}"
-                                })
-                                strategist_acted_this_turn = True 
-                            else:
-                                self.text_display.add_message("[Error] Strategist output was not a valid non-empty JSON list of strings.")
-                        except json.JSONDecodeError:
-                            self.text_display.add_message(f"[Error] Strategist output was not valid JSON: {strategist_output_text}")
-                        except Exception as e:
-                            self.text_display.add_message(f"[Error] Error executing strategist plan: {e}")
-                    except Exception as e:
-                        self.text_display.add_message(f"[Error] Strategist LLM call failed: {e}")
-                        self.message_history.append({"role": "user", "content": strategist_prompt_filled}) # Log the prompt
-                        self.message_history.append({"role": "assistant", "content": f"Error calling strategist: {e}"})
+                    logger.error(f"Error calling SambaNova Vision Model: {e}", exc_info=True)
+                    vision_model_response_text = f"Error interacting with Vision LLM: {e}"
+                    self.message_history.append(vision_model_input_messages[-1]) # User message to Vision model
+                    self.message_history.append({"role": "assistant", "content": vision_model_response_text})
+                    # Potentially skip to next iteration or handle error more gracefully
+                    steps_completed += 1 # Ensure loop progresses
+                    continue
                 
-                # Process tool calls from the VISION/TOOL model (if strategist didn't act)
-                if not strategist_acted_this_turn and vision_tool_model_tool_calls:
+                # --- STRATEGIST STEP ---
+                logger.info("--- STRATEGIST STEP ---")
+                strategist_model_input_messages = copy.deepcopy(self.message_history) # History now includes vision output
+
+                # Construct user message for Strategist model
+                # This prompt should combine game state with the vision model's description
+                strategist_user_prompt = (
+                    f"{game_state_text}\n\n"
+                    f"Vision Model's Description of the current scene:\n{vision_model_response_text}\n\n"
+                    f"{SAMBANOVA_STRATEGIST_PROMPT}" # Placeholder for actual strategist prompt
+                )
+                strategist_model_input_messages.append({"role": "user", "content": strategist_user_prompt})
+                
+                # Ensure system prompt (though strategist_prompt might act as one)
+                if not strategist_model_input_messages or strategist_model_input_messages[0].get("role") != "system":
+                     strategist_model_input_messages.insert(0, {"role": "system", "content": "You are a game strategist. Analyze the situation and formulate a plan."})
+
+
+                strategist_model_plan_text = ""
+                try:
+                    response_strategist = self.sambanova_client.chat.completions.create(
+                        model=SAMBANOVA_STRATEGIST_MODEL_ID,
+                        messages=strategist_model_input_messages,
+                        temperature=TEMPERATURE,
+                        max_tokens=MAX_TOKENS
+                    )
+                    token_usage += response_strategist.usage.total_tokens if response_strategist.usage else 0
+                    strategist_model_plan_text = response_strategist.choices[0].message.content if response_strategist.choices[0].message.content else ""
+                    logger.info(f"SambaNova Strategist Model response usage: {response_strategist.usage.total_tokens if response_strategist.usage else 'N/A'} tokens.")
+                    self.text_display.add_message(f"[Strategist Model Plan] {strategist_model_plan_text}")
+
+                    # Update history with Strategist model's input and output
+                    self.message_history.append(strategist_model_input_messages[-1]) # User message to Strategist
+                    self.message_history.append({"role": "assistant", "content": strategist_model_plan_text})
+
+                except Exception as e:
+                    logger.error(f"Error calling SambaNova Strategist Model: {e}", exc_info=True)
+                    strategist_model_plan_text = f"Error interacting with Strategist LLM: {e}"
+                    self.message_history.append(strategist_model_input_messages[-1]) # User message to Strategist
+                    self.message_history.append({"role": "assistant", "content": strategist_model_plan_text})
+                    steps_completed += 1
+                    continue
+
+                # --- TOOL MODEL STEP ---
+                logger.info("--- TOOL MODEL STEP ---")
+                tool_model_input_messages = copy.deepcopy(self.message_history) # History now includes strategist plan
+
+                # Construct user message for Tool model
+                # This prompt should provide the strategist's plan and relevant context for tool selection
+                tool_user_prompt = (
+                    f"{game_state_text}\n\n" # Provide current game state again for context if needed
+                    f"Strategist's Plan:\n{strategist_model_plan_text}\n\n"
+                    f"{TOOL_MODEL_PROMPT}" # Placeholder for actual tool model prompt
+                )
+                tool_model_input_messages.append({"role": "user", "content": tool_user_prompt})
+
+                # Ensure system prompt
+                if not tool_model_input_messages or tool_model_input_messages[0].get("role") != "system":
+                     tool_model_input_messages.insert(0, {"role": "system", "content": "You are a tool selection expert. Convert the plan into tool calls."})
+                
+                tool_model_tool_calls = None
+                tool_model_response_text = "" # Text response from tool model, if any
+                try:
+                    response_tool_model = self.sambanova_client.chat.completions.create(
+                        model=SAMBANOVA_TOOL_MODEL_ID,
+                        messages=tool_model_input_messages,
+                        tools=OPENAI_TOOLS, 
+                        tool_choice="auto",
+                        temperature=TEMPERATURE,
+                        max_tokens=MAX_TOKENS
+                    )
+                    token_usage += response_tool_model.usage.total_tokens if response_tool_model.usage else 0
+                    logger.info(f"SambaNova Tool Model response usage: {response_tool_model.usage.total_tokens if response_tool_model.usage else 'N/A'} tokens.")
+
+                    response_message_tool_model = response_tool_model.choices[0].message
+                    tool_model_tool_calls = response_message_tool_model.tool_calls
+                    tool_model_response_text = response_message_tool_model.content if response_message_tool_model.content else ""
+
+                    # Update history with Tool model's input and output (including tool calls)
+                    self.message_history.append(tool_model_input_messages[-1]) # User message to Tool model
+                    
+                    assistant_message_for_tool_model_history = {"role": "assistant"}
+                    if tool_model_response_text:
+                        assistant_message_for_tool_model_history["content"] = tool_model_response_text
+                        self.text_display.add_message(f"[Tool Model Text] {tool_model_response_text}")
+                    if tool_model_tool_calls:
+                        assistant_message_for_tool_model_history["tool_calls"] = tool_model_tool_calls
+                        for tc in tool_model_tool_calls:
+                             self.text_display.add_message(f"[Tool Model Tool Call] Requesting: {tc.function.name} ID: {tc.id} Args: {tc.function.arguments}")
+                    # Ensure content is not None if no text and no tool_calls
+                    if not tool_model_response_text and not tool_model_tool_calls:
+                        assistant_message_for_tool_model_history["content"] = "" 
+                    
+                    self.message_history.append(assistant_message_for_tool_model_history)
+
+                except Exception as e:
+                    logger.error(f"Error calling SambaNova Tool Model: {e}", exc_info=True)
+                    # Update history with error
+                    self.message_history.append(tool_model_input_messages[-1]) # User message to Tool model
+                    self.message_history.append({"role": "assistant", "content": f"Error interacting with Tool LLM: {e}"})
+                    steps_completed += 1
+                    continue
+                
+                # --- TOOL EXECUTION STEP ---
+                if tool_model_tool_calls:
                     tool_responses_for_history = []
-                    for tool_call_obj in vision_tool_model_tool_calls:
-                        tool_result_from_processing = self.process_tool_call(tool_call_obj)
-                        actual_content_for_history = json.dumps(tool_result_from_processing["content"])
+                    for tool_call_obj in tool_model_tool_calls:
+                        # process_tool_call will need to be refactored to return OpenAI compatible dict
+                        # and handle state updates internally or return necessary info.
+                        # For now, assume it's adapted or will be.
+                        tool_result_from_processing = self.process_tool_call(tool_call_obj) 
+                        
+                        # Ensure content is a string for OpenAI 'tool' role message
+                        # The refactored process_tool_call should return a string content.
+                        actual_content_for_history = tool_result_from_processing.get("content", "Tool executed, no content returned.")
+                        if not isinstance(actual_content_for_history, str):
+                            actual_content_for_history = json.dumps(actual_content_for_history)
+
                         tool_responses_for_history.append({
                             "role": "tool",
                             "tool_call_id": tool_call_obj.id,
@@ -1235,13 +1265,12 @@ Pay attention to the following procedure when trying to reach a specific locatio
                     if tool_responses_for_history:
                         self.message_history.extend(tool_responses_for_history)
                 
-                elif not strategist_acted_this_turn and not vision_tool_model_tool_calls and not vision_tool_model_response_text:
-                    # If no action from strategist, no tools from vision/tool model, and no text from vision/tool model
+                elif not tool_model_tool_calls and not tool_model_response_text : # No tool calls and no text from tool model
                     self.message_history.append(
-                        {"role": "user", "content": [{"type": "text", "text": "No specific action was determined. Please assess the situation and continue playing."}]}
+                        {"role": "user", "content": [{"type": "text", "text": "No specific action or tool call was determined by the Tool Model. Please assess the situation and continue playing."}]}
                     )
 
-            except Exception as e: # Catch broader exceptions in the main loop processing (e.g. before API call)
+            except Exception as e: # Catch broader exceptions in the main loop processing
                 logger.error(f"Error in agent run loop step: {e}", exc_info=True)
                 error_message_for_history = {"role": "user", "content": f"Encountered an error in the previous step: {e}. Attempting to recover."}
                 if not self.message_history or self.message_history[-1]["role"] != "user":
