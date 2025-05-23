@@ -1091,7 +1091,7 @@ Pay attention to the following procedure when trying to reach a specific locatio
                     })
                     user_content_parts.append({"type": "text", "text": "\nAnalyze the current game screen and state. Your primary goal is to progress in the game. Decide the next best action or set of actions. Use tools if appropriate. Explain your reasoning before acting."})
                 else: # SAMBANOVA_TOOL_MODEL_ID
-                     user_content_parts.append({"type": "text", "text": "\nBased on the current game state, decide the next best action or set of actions to progress in the game. Use tools if appropriate. Explain your reasoning before acting."})
+                     user_content_parts.append("\nBased on the current game state, decide the next best action or set of actions to progress in the game. Use tools if appropriate.")
                 
                 # Add the fully constructed user message to messages_for_api
                 messages_for_api.append({"role": "user", "content": user_content_parts})
