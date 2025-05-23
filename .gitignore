@@ -11,6 +11,7 @@ agentic_summary.txt
 
 # Environment variables
 .env
+*.env
 
 # ROM files
 *.gb
