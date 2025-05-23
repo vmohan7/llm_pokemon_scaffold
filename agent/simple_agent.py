@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import numpy as np
+from dotenv import load_dotenv
 import os
 import pickle
 from PIL import ImageDraw, ImageFilter, Image
@@ -12,18 +13,13 @@ import time
 import json # Ensure json is imported
 
 from config import MAX_TOKENS, TEMPERATURE, DIRECT_NAVIGATION, SAMBANOVA_BASE_URL, SAMBANOVA_VISION_MODEL_ID, SAMBANOVA_TOOL_MODEL_ID, SAMBANOVA_STRATEGIST_MODEL_ID
-from agent.prompts import SYSTEM_PROMPT, FULL_NAVIGATOR_PROMPT, NAVIGATION_PROMPT, META_KNOWLEDGE_PROMPT, META_KNOWLEDGE_CLEANUP_PROMPT, META_KNOWLEDGE_SUMMARIZER, SAMBANOVA_STRATEGIST_PROMPT # Added SAMBANOVA_STRATEGIST_PROMPT
-from secret_api_keys import *
+from agent.prompts import SYSTEM_PROMPT, SAMBANOVA_STRATEGIST_PROMPT # Added SAMBANOVA_STRATEGIST_PROMPT
 from agent.emulator import Emulator
 from agent.tool_definitions import *
 # from agent.utils import convert_anthropic_message_history_to_google_format, extract_tool_calls_from_gemini # Removed
 
 from openai import OpenAI # Ensure this import is present
-# Remove Anthropic and Gemini clients as they are no longer used
-# from anthropic import Anthropic
-# from google import genai
-# from google.genai import types
-# from google.genai.errors import ServerError
+
 from openai.types import responses
 from openai import BadRequestError
 
@@ -311,9 +307,10 @@ class SimpleAgent:
             self.emulator.initialize(**self.emulator_init_kwargs)
         
         # Initialize SambaNova client
+        load_dotenv()
         self.sambanova_client = OpenAI(
-            baseURL=SAMBANOVA_BASE_URL, 
-            api_key=os.environ.get("SAMBANOVA_API_KEY")
+            base_url=SAMBANOVA_BASE_URL, 
+            api_key=os.getenv("SAMBANOVA_API_KEY")
         )
 
         self.running = True
@@ -666,16 +663,10 @@ class SimpleAgent:
         # The previous check for self.emulator.get_in_combat() and adding a note about detailed_navigator_mode is removed.
         if not self.emulator.get_in_combat() and self.use_full_collision_map:
             content.append({"type": "text", "text": "Here is a map of this RAM location compiled so far:\n\n[TEXT_MAP]" + self.update_and_get_full_collision_map(location, coords) + "\n\n[/TEXT_MAP]"})
-        return {
-            "type": "tool_result",
-            "tool_use_id": tool_id,
-            "content": content,
-        }
-                "content": [
-                    {"type": "text", "text": (
-                        f"Pressed buttons: {', '.join(buttons)}"
-                    )}
-                ],
+            return {
+                "type": "tool_result",
+                "tool_use_id": tool_id,
+                "content": f"Pressed buttons: {', '.join(buttons)}",
             }
         else:
             # Get a fresh screenshot after executing the buttons
@@ -818,15 +809,15 @@ class SimpleAgent:
                             col.extend(False for _ in range(0, coords[1] + 1))
                     cols[coords[0]][coords[1]] = True
 
-            # TODO: eventually do this more reasonably. For now we do this extraordinarily dumb approach.
-            all_labels = self.get_all_location_labels(location)
+                    # TODO: eventually do this more reasonably. For now we do this extraordinarily dumb approach.
+                    all_labels = self.get_all_location_labels(location)
 
-            # Return tool result as a dictionary
-            # Simplified: detailed_navigator_mode removed.
-            screenshot = self.emulator.get_screenshot()
-            screenshot_b64 = self.get_screenshot_base64(screenshot, upscale=4, add_coords=True, player_coords=coords, location=location)
-            last_checkpoints = '\n'.join(self.checkpoints[-10:])
-            # Standardized content structure for navigate_to tool result
+                    # Return tool result as a dictionary
+                    # Simplified: detailed_navigator_mode removed.
+                    screenshot = self.emulator.get_screenshot()
+                    screenshot_b64 = self.get_screenshot_base64(screenshot, upscale=4, add_coords=True, player_coords=coords, location=location)
+                    last_checkpoints = '\n'.join(self.checkpoints[-10:])
+                    # Standardized content structure for navigate_to tool result
                     content = [
                             {"type": "text", "text": f"Navigation result: {result}"},
                             {"type": "text", "text": f"\nGame state information from memory after your action:\n{memory_info}"},
@@ -1515,385 +1506,6 @@ Your job is NOT to play the game now, but to summarize the state FOR the game-pl
                     {
                         "type": "text",
                         "text": "You were just asked to summarize your playthrough. The summary and current screen are above. Continue playing."
-                    },
-                ]
-            }
-        ]
-        
-    def stop(self):
-        """Stop the agent."""
-        self.running = False
-        self.emulator.stop()
-
-
-if __name__ == "__main__":
-    # Get the ROM path relative to this file
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    rom_path = os.path.join(os.path.dirname(current_dir), "pokemon.gb")
-
-    # Create and run agent
-    agent = SimpleAgent(rom_path)
-
-    try:
-        steps_completed = agent.run(num_steps=10)
-        logger.info(f"Agent completed {steps_completed} steps")
-    except KeyboardInterrupt:
-        logger.info("Received keyboard interrupt, stopping")
-    finally:
-        agent.stop()
-
-    
-                        location = self.emulator.get_location()
-                        exploration_command = self.mapping_tool()
-                        local_map = self.map_tool_map.get(
-                            location
-                        )
-                        if local_map is not None:
-                            tool_results.append(
-                                {"type": "text", "text": f"HERE IS AN ASCII MAP OF THIS LOCATION BASED ON YOUR EXPLORATION: {local_map}"})
-                        if exploration_command is not None:
-                            tool_results.append(
-                                {"type": "text", "text": f"EXPLORATION COMMAND: {exploration_command}"})
-                            logger.info(f"Mapping tool forcing redirection: {exploration_command}")
-                        with open("mapping_log.txt", "w", encoding="utf-8") as fw:
-                            fw.write(local_map)"""
-                    if malformed:
-                        tool_results.append({"type": "text", "text": f"WARNING: MALFORMED TOOL CALL. Call using the function call, not in the text."})
-
-                    # Add tool results to message history
-                    messages_here.append(
-                        {"role": "user", "content": tool_results}  # type: ignore
-                    )
-                    
-                    # Check if we need to summarize the history
-                    if self.detailed_navigator_mode and not self.emulator.get_in_combat():
-                        # No agentic in navigator mode
-                        if len(self.navigator_message_history) >= self.max_history:
-                            # Truncation is not as straightforward as I'd like, because of the potential to break tool calls
-                            self.navigator_message_history = self.navigator_message_history[self.max_history - len(self.navigator_message_history):]
-                            remove = False
-                            for k, message in enumerate(self.navigator_message_history):
-                                # If we see a tool_call we're clear, because we don't have async tool calls.
-                                for content in message['content']:
-                                    if isinstance(message['content'], str):
-                                        continue
-                                    if content["type"] == "tool_call":
-                                        break
-                                    elif content["type"] == "tool_result":  # uh-oh, we're going to have to remove everything up to this.
-                                        remove = True
-                                        break
-                            if remove:
-                                self.navigator_message_history = self.navigator_message_history[k + 1:]
-                        if len(self.openai_navigator_message_history) >= self.max_history: 
-                            self.openai_navigator_message_history = self.openai_navigator_message_history[self.max_history - len(self.openai_navigator_message_history):]
-                            # Let's scroll in, if we run into a tool_call_output, let's get rid of it since it's an orphaned tool_call.
-                            
-                            if self.openai_navigator_message_history and self.openai_navigator_message_history[0].get('type') == "function_call_output":
-                                self.openai_navigator_message_history = self.openai_navigator_message_history[1:]
-
-                    else:
-                        # MODEL constant is removed. The condition for agentic_summary might need adjustment
-                        # if token limits or history length considerations are different for SambaNova.
-                        if len(self.message_history) >= self.max_history or token_usage > 170000: # Assuming similar token limits for now
-                            self.agentic_summary()
-                if not tool_calls:  # type: ignore
-                    # Sometimes it just stalls out mysteriously or says some text.
-                    messages_here.append(
-                        {"role": "user", "content": [{"text": "Can you please continue playing the game?", "type": "text"}]}  # type: ignore
-                    )
-
-                steps_completed += 1
-                self.absolute_step_count += 1
-                self.steps_since_checkpoint += 1
-                self.steps_since_label_reset += 1
-                self.steps_since_location_shift += 1
-                if self.steps_since_location_shift > 300 and not self.detailed_navigator_mode:  # Since Claude absolutely refuses to ask for help.
-                    self.detailed_navigator_mode = True
-                    self.navigation_location = location
-                    self.navigator_message_history = [{"role": "user", "content": "Please begin navigating!"}]
-                    self.openai_navigator_message_history = [{"role": "user", "content": "Please begin navigating!"}]
-                if self.steps_since_checkpoint > 50 and not self.location_tracker_activated:
-                    self.location_tracker_activated = True
-                    self.location_tracker = {}
-                _, location, _ = self.emulator.get_state_from_memory()
-                if self.last_location != location:
-                    if self.last_coords is not None and not self.emulator.get_in_combat() and self.last_location is not None:
-                        self.label_archive.setdefault(self.last_location, {}).setdefault(self.last_coords[1], {})[self.last_coords[0]] = f"Entrance to {location} (Approximate)"
-                    self.steps_since_location_shift = 0
-                    self.steps_since_label_reset = 0
-                    # The navigator turns OFF the moment the location changes.
-                    if self.detailed_navigator_mode and location != self.no_navigate_here and location != self.navigation_location:
-                        self.text_display.add_message("New Location reached; Navigator Mode Off")
-                        self.message_history.append(
-                            {"role": "user", "content": [{"text": "Note: Detailed Navigator Mode was just turned off since a new location was reached", "type": "text"}]}  # type: ignore
-                        )
-                        self.openai_message_history.append({"role": "user", "content": [{"text": "Note: Detailed Navigator Mode was just turned off since a new location was reached", "type": "text"}]})
-                        # TODO: Consolidate navigator messages and clear
-                    self.detailed_navigator_mode = False
-                self.last_location = location
-                # MODEL constant is removed. The threshold for steps_since_label_reset might need to be re-evaluated
-                # or made consistent if it was model-dependent.
-                if self.steps_since_label_reset > 200: # Using a single value for now, adjust if necessary
-                    self.text_display.add_message("Clearing labels to clear potential bad labels...")
-                    self.steps_since_label_reset = 0
-                    # Hack: let's keep the ones that say "approximate" though. Those are not-Claude labels and probably fine.
-                    location_archive = self.label_archive.get(location)
-                    if location_archive:
-                        for key, value in location_archive.items():
-                            for key2, value2 in value.items():
-                                if "approximate" not in value2.lower():
-                                    del value[key2]
-                            if not value:
-                                del location_archive[key]
-                logger.info(f"Completed step {steps_completed}/{num_steps}")
-                self.text_display.add_message(f"Absolute step count: {self.absolute_step_count}")
-                if save_file_name is not None and not steps_completed % save_every:
-                    self.emulator.save_state(save_file_name)
-                    self.save_location_archive(self.location_archive_file_name)
-                    with open("location_milestones.txt", "w") as fw:
-                        fw.write(str(self.location_milestones))
-
-            except KeyboardInterrupt:
-                logger.info("Received keyboard interrupt, stopping")
-                self.running = False
-            except Exception as e:
-                logger.error(f"Error in agent loop: {e}")
-                raise e
-            
-        if save_file_name is not None:
-            logger.info("Saving state")
-            self.emulator.save_state(save_file_name)
-            self.save_location_archive(self.location_archive_file_name)
-            with open("location_milestones.txt", "w") as fw:
-                fw.write(str(self.location_milestones))
-
-        if (
-            not self.running
-            # if the emulator is running in the main thread, we need to stop it
-            # to allow the main thread to exit the emulator loop
-            or self.pyboy_main_thread
-        ):
-            self.emulator.stop()
-
-        self._steps_completed = steps_completed
-
-        return steps_completed
-
-    def navigation_assistance(self, navigation_goal: str) -> str:
-        logger.info(f"[Agent] Running Navigation Assist...")
-        
-        _, location, coords = self.emulator.get_state_from_memory()
-
-        collision_map = self.update_and_get_full_collision_map(location, coords)
-
-        this_location = self.label_archive.get(location)
-        if this_location is None:
-            # this sucks man
-            for key, value in self.label_archive.items():
-                if location.lower() == key.lower():
-                    this_location = value
-                    break
-
-        labels = "No Labels yet."
-        all_labels = []
-        if this_location is not None:
-            for row_ind, this_row in this_location.items():
-                for col_ind, this_col in this_row.items():
-                    all_labels.append(((col_ind, row_ind), this_col)) 
-
-        if all_labels:                
-            labels = ','.join(f'{label_coords}: {label}' for label_coords, label in all_labels)
-
-        mapping_query = f"""Here is a map of the current location:
-
-        Current location: {location}
-
-        {collision_map}
-
-        Remember, higher numbers in the first coordinate are to the RIGHT. Higher numbers in the second coordinate are DOWN.
-        
-        Here are some labels:
-
-        {labels}
-
-        Here is the current navigation goal:
-
-        {navigation_goal}
-        """
-
-        full_text = self.prompt_text_reply(NAVIGATION_PROMPT, mapping_query, False, MAPPING_MODEL, False)
-        self.text_display.add_message(f"Navigation Advice: {full_text}")
-        return full_text
-    
-    # Note: currently not used in any part of detailed_navigator_mode, so we don't have any handling for that.
-    def prompt_text_reply(self, instructions: str, prompt: str, include_history: bool, model: str, include_screenshot: bool) -> str:
-
-        if include_history:
-            # Create messages for the summarization request - pass the entire conversation history
-            messages = copy.deepcopy(self.message_history) 
-
-
-            if len(messages) >= 3:
-                if messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list) and messages[-1]["content"]:
-                    messages[-1]["content"][-1]["cache_control"] = {"type": "ephemeral"}
-                
-                if len(messages) >= 5 and messages[-3]["role"] == "user" and isinstance(messages[-3]["content"], list) and messages[-3]["content"]:
-                    messages[-3]["content"][-1]["cache_control"] = {"type": "ephemeral"}
-        else:
-            messages = []
-
-        if include_screenshot:
-            _, location, coords = self.emulator.get_state_from_memory()
-            screenshot = self.emulator.get_screenshot()
-            screenshot_b64 = self.get_screenshot_base64(screenshot, upscale=4, add_coords=True, player_coords=coords, location=location)
-
-        # MODEL constant is removed. This function will now use self.sambanova_client.
-        # The 'model' parameter to this function is also effectively removed/ignored.
-        # This requires adapting the message formatting and API call to SambaNova.
-
-        samba_messages = [] # Prepare messages in SambaNova format
-        if include_history:
-            # Convert self.message_history to SambaNova format
-            # This is a placeholder; actual conversion logic depends on SambaNova's expected format.
-            # For now, let's assume self.message_history is somewhat compatible or needs minor adjustments.
-            samba_messages = copy.deepcopy(self.message_history) # Placeholder
-            # Potentially strip or reformat parts of the history if needed for SambaNova.
-
-        # Construct the current user message for SambaNova
-        current_user_content_parts = []
-        current_user_content_parts.append({"type": "text", "text": prompt}) # Assuming SambaNova takes text parts like this
-
-        if include_screenshot:
-            current_user_content_parts.append({
-                "type": "image", # Or SambaNova's equivalent for image input
-                "source": { # Or SambaNova's equivalent
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": screenshot_b64,
-                },
-            })
-        
-        samba_messages.append({"role": "user", "content": current_user_content_parts})
-
-
-        # Placeholder for SambaNova API call
-        # response = self.sambanova_client.chat.completions.create( # Or equivalent
-        #     model=SAMBANOVA_STRATEGIST_MODEL_ID, # Or another appropriate model for summarization/text reply
-        #     messages=samba_messages, # Ensure this is correctly formatted
-        #     max_tokens=MAX_TOKENS,
-        #     # system=instructions, # How SambaNova handles system/instructions
-        #     temperature=TEMPERATURE,
-        # )
-        # # Extract the text - Adjust based on SambaNova's response structure
-        # summary_text = "".join([choice.message.content for choice in response.choices if choice.message.content]) # Example
-
-        # Due to the uncertainty of SambaNova's exact API for this,
-        # I will temporarily return a placeholder summary.
-        # This part MUST be updated with the correct SambaNova API calls.
-        logger.error("SambaNova API call for text reply not yet implemented. Returning placeholder summary.")
-        summary_text = "Placeholder summary from SambaNova integration."
-        
-        return summary_text
-    
-    def agentic_summary(self):
-        self.text_display.add_message(f"[Agent] Generating Facts Analysis, standby...")
-
-        memory_info, location, coords = self.emulator.get_state_from_memory()
-        try:
-            previous_summary = self.message_history[0]["content"][0]["text"]
-        except TypeError:
-            previous_summary = "Start of the Game!"
-        last_checkpoints = '\n'.join(self.checkpoints[-10:])
-
-        all_labels = self.get_all_location_labels(location)
-
-        if not self.emulator.get_in_combat():
-            collision_map = self.update_and_get_full_collision_map(location, coords)
-        else:
-            if location in self.full_collision_map:
-                collision_map = self.full_collision_map[location].to_ascii(self.location_tracker.get(location, []))
-            else:
-                collision_map = "Not yet available"
-
-        prompt = f"""
-Here is key game information:
-
-RAM Information: {memory_info}
-
-Steps Since last Location Shift: {self.steps_since_location_shift}
-
-text_based MAP: {collision_map}
-
-Last 10 Checkpoints: {last_checkpoints}
-
-Labeled nearby locations: {','.join(f'{coords}: {label}' for coords, label in all_labels)}
-
-Previous game summary: {previous_summary}
-
-A game screenshot is attached.
-
-REMINDER: Your job is to deduce the current state of the game from that conversation, as well as additional data you will be provided,
-Your job is NOT to play the game. Double-check your system prompt.
-"""
-
-        # Get the FACTS
-        response1 = self.prompt_text_reply(META_KNOWLEDGE_PROMPT, prompt, True, MODEL, True)
-        logger.info(f"Facts Stage 1: {response1}")
-        # Clean Facts
-        # MODEL constant is removed. Calls to prompt_text_reply will use SambaNova by default.
-        response2 = self.prompt_text_reply(META_KNOWLEDGE_CLEANUP_PROMPT, response1, False, SAMBANOVA_STRATEGIST_MODEL_ID, False) # Explicitly pass model if needed by updated func
-        logger.info(f"Facts Stage 2: {response2}")
-        # Summarize for real
-        response3 = self.prompt_text_reply(META_KNOWLEDGE_SUMMARIZER, response2, True, SAMBANOVA_STRATEGIST_MODEL_ID, False) # Explicitly pass model
-        self.text_display.add_message(f"Final Summary: {response3}")
-        with open("agentic_summary.txt", "w", encoding="utf-8") as fw:
-            fw.write(response1 + "\n\n" + response2 + "\n\n" + response3)
-
-        # Get a fresh screenshot after executing the buttons
-        screenshot = self.emulator.get_screenshot()
-        screenshot_b64 = self.get_screenshot_base64(screenshot, upscale=4, add_coords=True, player_coords=coords, location=location)
-
-        # Replace message history with just the summary
-        self.message_history = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"CONVERSATION HISTORY SUMMARY (representing {self.max_history} previous messages): {response3}"
-                    },
-                    {
-                        "type": "text",
-                        "text": "\n\nCurrent game screenshot for reference:"
-                    },
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": screenshot_b64,
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": "You were just asked to summarize your playthrough so far, which is the summary you see above. You may now continue playing by selecting your next action."
-                    },
-                ]
-            }
-        ]
-        self.openai_message_history = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": (f"CONVERSATION HISTORY SUMMARY (representing {self.max_history} previous messages): {response3}" +
-                                 "\n\nCurrent game screenshot is also included." +
-                                 "\n\nYou were just asked to summarize your playthrough so far, which is the summary you see above. You may now continue playing by selecting your next a.")
-                    },
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:image/png;base64,{screenshot_b64}",
                     },
                 ]
             }
