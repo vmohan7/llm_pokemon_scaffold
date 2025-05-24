@@ -16,7 +16,7 @@ from config import MAX_TOKENS, TEMPERATURE, DIRECT_NAVIGATION, SAMBANOVA_BASE_UR
 from agent.prompts import SYSTEM_PROMPT, SAMBANOVA_STRATEGIST_PROMPT, PURE_VISION_PROMPT, TOOL_MODEL_PROMPT # Placeholders
 from agent.emulator import Emulator
 from agent.tool_definitions import *
-# from agent.utils import convert_anthropic_message_history_to_google_format, extract_tool_calls_from_gemini # Removed
+from agent.utils import convert_to_deepseek_format
 
 from openai import OpenAI # Ensure this import is present
 
@@ -314,9 +314,7 @@ class SimpleAgent:
         )
 
         self.running = True
-        # TODO: OKAY LOOK this was originally a pretty small state and that it got out of hand.
-        self.message_history = [{"role": "system", "content": "You are a helpful assistant."}]
-        # self.openai_message_history = [{"role": "user", "content": "You may now begin playing."}] # Removed
+        self.message_history = []
         self.max_history = max_history
         self.location_history_length = location_history_length
         self.location_archive_file_name = location_archive_file_name
@@ -1095,7 +1093,8 @@ Output ONLY the JSON for the 'press_buttons' tool call, like {"{'buttons': ['up'
                 # --- VISION STEP ---
                 logger.info("--- VISION STEP ---")
                 vision_model_input_messages = copy.deepcopy(self.message_history)
-                
+                print(vision_model_input_messages)
+
                 # Construct user message for Vision model
                 vision_user_content_parts = [{"type": "text", "text": str(game_state_text)}]
                 screenshot = self.emulator.get_screenshot()
@@ -1126,21 +1125,21 @@ Output ONLY the JSON for the 'press_buttons' tool call, like {"{'buttons': ['up'
                     self.text_display.add_message(f"[Vision Model Text] {vision_model_response_text}")
 
                     # Update history with Vision model's input and output
-                    self.message_history.append(vision_model_input_messages[-1]) # User message to Vision model
-                    self.message_history.append({"role": "assistant", "content": vision_model_response_text})
+                    self.message_history.append({"role": "user", "content": vision_user_content_parts}) # User message to Vision model
+                    self.message_history.append({"role": "assistant", "content": {"type": "text", "text": vision_model_response_text}})
 
                 except Exception as e:
                     logger.error(f"Error calling SambaNova Vision Model: {e}", exc_info=True)
                     vision_model_response_text = f"Error interacting with Vision LLM: {e}"
-                    self.message_history.append(vision_model_input_messages[-1]) # User message to Vision model
-                    self.message_history.append({"role": "assistant", "content": vision_model_response_text})
+                    self.message_history.append({"role": "user", "content": vision_user_content_parts}) # User message to Vision model
+                    self.message_history.append({"role": "assistant", "content": {"type": "text", "text": vision_model_response_text}})
                     # Potentially skip to next iteration or handle error more gracefully
                     steps_completed += 1 # Ensure loop progresses
                     continue
                 
                 # --- STRATEGIST STEP ---
                 logger.info("--- STRATEGIST STEP ---")
-                strategist_model_input_messages = copy.deepcopy(self.message_history) # History now includes vision output
+                strategist_model_input_messages = convert_to_deepseek_format(copy.deepcopy(self.message_history)) # History now includes vision output
 
                 # Construct user message for Strategist model
                 # This prompt should combine game state with the vision model's description
@@ -1153,7 +1152,7 @@ Output ONLY the JSON for the 'press_buttons' tool call, like {"{'buttons': ['up'
                 
                 # Ensure system prompt (though strategist_prompt might act as one)
                 if not strategist_model_input_messages or strategist_model_input_messages[0].get("role") != "system":
-                     strategist_model_input_messages.insert(0, {"role": "system", "content": "You are a game strategist. Analyze the situation and formulate a plan."})
+                     strategist_model_input_messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
 
 
                 strategist_model_plan_text = ""
@@ -1170,20 +1169,20 @@ Output ONLY the JSON for the 'press_buttons' tool call, like {"{'buttons': ['up'
                     self.text_display.add_message(f"[Strategist Model Plan] {strategist_model_plan_text}")
 
                     # Update history with Strategist model's input and output
-                    self.message_history.append(strategist_model_input_messages[-1]) # User message to Strategist
-                    self.message_history.append({"role": "assistant", "content": strategist_model_plan_text})
+                    self.message_history.append({"role": "user", "content": {"type": "text", "text": strategist_user_prompt}})
+                    self.message_history.append({"role": "assistant", "content": {"type": "text", "text": strategist_model_plan_text}})
 
                 except Exception as e:
                     logger.error(f"Error calling SambaNova Strategist Model: {e}", exc_info=True)
                     strategist_model_plan_text = f"Error interacting with Strategist LLM: {e}"
-                    self.message_history.append(strategist_model_input_messages[-1]) # User message to Strategist
-                    self.message_history.append({"role": "assistant", "content": strategist_model_plan_text})
+                    self.message_history.append({"role": "user", "content": {"type": "text", "text": strategist_user_prompt}})
+                    self.message_history.append({"role": "assistant", "content": {"type": "text", "text": strategist_model_plan_text}})
                     steps_completed += 1
                     continue
 
                 # --- TOOL MODEL STEP ---
                 logger.info("--- TOOL MODEL STEP ---")
-                tool_model_input_messages = copy.deepcopy(self.message_history) # History now includes strategist plan
+                tool_model_input_messages = convert_to_deepseek_format(copy.deepcopy(self.message_history)) # History now includes strategist plan
 
                 # Construct user message for Tool model
                 # This prompt should provide the strategist's plan and relevant context for tool selection
@@ -1205,7 +1204,7 @@ Output ONLY the JSON for the 'press_buttons' tool call, like {"{'buttons': ['up'
                         model=SAMBANOVA_TOOL_MODEL_ID,
                         messages=tool_model_input_messages,
                         tools=OPENAI_TOOLS, 
-                        tool_choice="auto",
+                        tool_choice="required",
                         temperature=TEMPERATURE,
                         max_tokens=MAX_TOKENS
                     )
@@ -1217,27 +1216,24 @@ Output ONLY the JSON for the 'press_buttons' tool call, like {"{'buttons': ['up'
                     tool_model_response_text = response_message_tool_model.content if response_message_tool_model.content else ""
 
                     # Update history with Tool model's input and output (including tool calls)
-                    self.message_history.append(tool_model_input_messages[-1]) # User message to Tool model
+                    self.message_history.append({"role": "user", "content": {"type": "text", "text": tool_user_prompt}})
                     
-                    assistant_message_for_tool_model_history = {"role": "assistant"}
+                    assistant_message_for_tool_model_history = {"role": "assistant", "content": {"type": "text", "text": ""}}
                     if tool_model_response_text:
-                        assistant_message_for_tool_model_history["content"] = tool_model_response_text
+                        assistant_message_for_tool_model_history["content"]["text"] = tool_model_response_text
                         self.text_display.add_message(f"[Tool Model Text] {tool_model_response_text}")
                     if tool_model_tool_calls:
-                        assistant_message_for_tool_model_history["tool_calls"] = tool_model_tool_calls
                         for tc in tool_model_tool_calls:
-                             self.text_display.add_message(f"[Tool Model Tool Call] Requesting: {tc.function.name} ID: {tc.id} Args: {tc.function.arguments}")
-                    # Ensure content is not None if no text and no tool_calls
-                    if not tool_model_response_text and not tool_model_tool_calls:
-                        assistant_message_for_tool_model_history["content"] = "" 
+                            assistant_message_for_tool_model_history["content"]["text"] = f"[Tool Model Tool Call] Requesting: {tc.function.name} ID: {tc.id} Args: {tc.function.arguments}" #tool_model_tool_calls
+                            self.text_display.add_message(f"[Tool Model Tool Call] Requesting: {tc.function.name} ID: {tc.id} Args: {tc.function.arguments}")
                     
                     self.message_history.append(assistant_message_for_tool_model_history)
 
                 except Exception as e:
                     logger.error(f"Error calling SambaNova Tool Model: {e}", exc_info=True)
                     # Update history with error
-                    self.message_history.append(tool_model_input_messages[-1]) # User message to Tool model
-                    self.message_history.append({"role": "assistant", "content": f"Error interacting with Tool LLM: {e}"})
+                    self.message_history.append({"role": "user", "content": {"type": "text", "text": tool_user_prompt}})
+                    self.message_history.append({"role": "assistant", "content": {"type": "text", "text": f"Error interacting with Tool LLM: {e}"}})
                     steps_completed += 1
                     continue
                 
@@ -1431,7 +1427,7 @@ Output ONLY the JSON for the 'press_buttons' tool call, like {"{'buttons': ['up'
         
         # Safety check: if no system prompt is present at the start, add a generic one.
         if not messages_for_call or messages_for_call[0].get("role") != "system":
-             messages_for_call.insert(0, {"role": "system", "content": "You are a helpful AI assistant."})
+             messages_for_call.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
 
         try:
             response = self.sambanova_client.chat.completions.create(

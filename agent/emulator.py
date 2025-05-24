@@ -75,7 +75,8 @@ class Emulator:
             self.pyboy = PyBoy(
                 rom_path,
                 cgb=True,
-                sound=sound,
+                sound_emulated=False
+                #sound=sound,
             )
         # Run the emulator for a short time to make sure it's ready
         self.pyboy.set_emulation_speed(0)

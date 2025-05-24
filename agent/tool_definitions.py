@@ -158,11 +158,11 @@ OPENAI_TOOLS = convert_tool_defs_to_openai_format(AVAILABLE_TOOLS)
 #         continue
 #     GOOGLE_NAVIGATOR_TOOLS.append(entry)
 
-OPENAI_NAVIGATOR_TOOLS = [] # This can be kept if a navigator-specific subset of tools is still desired
-for entry in OPENAI_TOOLS:
-    if entry["name"] in ["detailed_navigator", "mark_checkpoint"]:
-        continue
-    OPENAI_NAVIGATOR_TOOLS.append(entry)
+#OPENAI_NAVIGATOR_TOOLS = [] # This can be kept if a navigator-specific subset of tools is still desired
+#for entry in OPENAI_TOOLS:
+#    if entry["name"] in ["detailed_navigator", "mark_checkpoint"]:
+#        continue
+#    OPENAI_NAVIGATOR_TOOLS.append(entry)
 
 
 
