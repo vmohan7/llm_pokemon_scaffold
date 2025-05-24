@@ -1097,14 +1097,14 @@ Output ONLY the JSON for the 'press_buttons' tool call, like {"{'buttons': ['up'
                 vision_model_input_messages = copy.deepcopy(self.message_history)
                 
                 # Construct user message for Vision model
-                vision_user_content_parts = [{"type": "text", "text": game_state_text}]
+                vision_user_content_parts = [{"type": "text", "text": str(game_state_text)}]
                 screenshot = self.emulator.get_screenshot()
                 screenshot_b64 = self.get_screenshot_base64(screenshot, upscale=1, add_coords=True, player_coords=current_coords, location=current_location)
                 vision_user_content_parts.append({
                     "type": "image_url",
                     "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}
                 })
-                vision_user_content_parts.append({"type": "text", "text": PURE_VISION_PROMPT}) # Placeholder for actual vision prompt
+                vision_user_content_parts.append({"type": "text", "text": str(PURE_VISION_PROMPT)})
 
                 vision_model_input_messages.append({"role": "user", "content": vision_user_content_parts})
                 
